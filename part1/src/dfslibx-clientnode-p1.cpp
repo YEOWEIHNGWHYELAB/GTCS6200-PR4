@@ -29,7 +29,7 @@ using grpc::ClientContext;
 
 extern dfs_log_level_e DFS_LOG_LEVEL;
 
-DFSClientNode::DFSClientNode() : mount_path("mnt/client/") {
+DFSClientNode::DFSClientNode() : deadline_timeout(12000), mount_path("mnt/client/") {
     char host[HOST_NAME_MAX];
     std::ostringstream ss_id;
     gethostname(host, HOST_NAME_MAX);
