@@ -116,7 +116,9 @@ DFSServerNode::DFSServerNode(const std::string &server_address,
  */
 DFSServerNode::~DFSServerNode() noexcept {
     dfs_log(LL_SYSINFO) << "DFSServerNode shutting down";
-    this->server->Shutdown();
+    if (this->server) {
+        this->server->Shutdown();
+    }
 }
 
 /** Server start **/
@@ -126,6 +128,10 @@ void DFSServerNode::Start() {
     builder.AddListeningPort(this->server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
     this->server = builder.BuildAndStart();
+    if (!this->server) {
+        dfs_log(LL_ERROR) << "Failed to start gRPC server at " << this->server_address;
+        return;
+    }
     dfs_log(LL_SYSINFO) << "DFSServerNode server listening on " << this->server_address;
     this->server->Wait();
 }
