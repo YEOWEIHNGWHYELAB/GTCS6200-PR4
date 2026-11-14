@@ -7,19 +7,63 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
+    // first request carries filename and source mtime, every req carries 1 chunk (the first may also carry data)
+    rpc StoreFile(stream StoreFileRequest) returns (FileStatusResponse);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
+    // first response carries filename and mtime as well as its data chunk
+    rpc FetchFile(FileRequest) returns (stream FileChunk);
 
     // 3. REQUIRED (Parts 1 & 2): A method to delete files from the server
+    rpc DeleteFile(FileRequest) returns (OperationResponse);
 
     // 4. REQUIRED (Parts 1 & 2): A method to list all files on the server
+    rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
 
     // 5. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+    rpc GetFileStatus(FileRequest) returns (FileStatusResponse);
 
     // 7. Any other methods you deem necessary to complete the tasks of this assignment
-
-
 }
 
 // Add your message types here
+
+message FileRequest {
+    string filename = 1;
+}
+
+message StoreFileRequest {
+    string filename = 1;
+    bytes content = 2;
+    int64 mtime = 3;
+}
+
+message FileChunk {
+    string filename = 1;
+    bytes content = 2;
+    int64 mtime = 3;
+}
+
+message FileInfo {
+    string filename = 1;
+    int64 mtime = 2;
+    uint64 size = 3;
+}
+
+message FileStatusResponse {
+    string filename = 1;
+    uint64 size = 2;
+    int64 mtime = 3;
+}
+
+message OperationResponse {
+    string filename = 1;
+}
+
+message ListFilesRequest {
+}
+
+message ListFilesResponse {
+    repeated FileInfo files = 1;
+}
 
