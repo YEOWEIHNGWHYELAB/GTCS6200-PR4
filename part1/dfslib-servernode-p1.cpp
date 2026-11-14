@@ -9,6 +9,11 @@
 #include <getopt.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <utime.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
+#include <functional>
 #include <grpcpp/grpcpp.h>
 
 #include "src/dfs-utils.h"
@@ -25,7 +30,48 @@ using grpc::ServerContext;
 using grpc::ServerBuilder;
 
 using dfs_service::DFSService;
+using dfs_service::FileChunk;
+using dfs_service::FileRequest;
+using dfs_service::FileStatusResponse;
+using dfs_service::ListFilesRequest;
+using dfs_service::ListFilesResponse;
+using dfs_service::OperationResponse;
+using dfs_service::StoreFileRequest;
 
+
+/**
+ * the following is an anonymous namespace (unnamed namespace)
+ *
+ * only visible to current source file
+ */
+namespace {
+
+    // the assignment store files in one flat directory, we reject path components
+    // instead of allowing a client to escape the configured mount point
+    bool ValidateFilename(const std::string& name) {
+        return !name.empty() && name != "." && name != ".." &&
+               name.find('/') == std::string::npos &&
+               name.find('\\') == std::string::npos &&
+               name.find('\0') == std::string::npos; // c style null terminator is dangerous in filenames
+    }
+
+    bool FillFileStatus(const std::string& path, const std::string& filename, FileStatusResponse* response) {
+        // stat stores metadata for a filesystem object
+        struct stat st;
+
+        // lstat() retrieves metadata for specified filesystem object, 0 is success, -1 is failure
+        if (lstat(path.c_str(), &st) != 0 || // note that POSIX functions - lstat() - expect a C-style string (const char*)
+            !S_ISREG(st.st_mode)) { // This checks whether the filesystem object is a regular file.
+            return false;
+        }
+
+        response->set_filename(filename);
+        response->set_size(static_cast<uint64_t>(st.st_size));
+        response->set_mtime(st.st_mtime);
+
+        return true;
+    }
+}
 
 //
 // STUDENT INSTRUCTION:
@@ -77,8 +123,7 @@ private:
 
 public:
 
-    DFSServiceImpl(const std::string &mount_path): mount_path(mount_path) {
-    }
+    explicit DFSServiceImpl(const std::string &path) : mount_path(dfs_clean_path(path)) {}
 
     ~DFSServiceImpl() {}
 

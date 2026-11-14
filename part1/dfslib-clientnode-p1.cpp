@@ -6,6 +6,8 @@
 #include <chrono>
 #include <errno.h>
 #include <csignal>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -14,6 +16,9 @@
 #include <unistd.h>
 #include <limits.h>
 #include <sys/inotify.h>
+#include <sys/stat.h>
+#include <utime.h>
+#include <fcntl.h>
 #include <grpcpp/grpcpp.h>
 
 #include "dfslib-shared-p1.h"
