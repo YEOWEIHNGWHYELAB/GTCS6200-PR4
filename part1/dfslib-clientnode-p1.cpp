@@ -45,6 +45,35 @@ using grpc::ClientContext;
 //
 
 
+using dfs_service::FileRequest;
+using dfs_service::StoreFileRequest;
+using dfs_service::FileChunk;
+using dfs_service::FileStatusResponse;
+using dfs_service::OperationResponse;
+using dfs_service::ListFilesRequest;
+using dfs_service::ListFilesResponse;
+
+namespace {
+    void SetDeadline(ClientContext* context, int timeout_ms) {
+        const int safe_timeout = timeout_ms > 0 ? timeout_ms : 12000;
+
+        // time which deadline will be reached
+        context->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(safe_timeout));
+    }
+
+    bool ValidateFilename(const std::string& name) {
+        return !name.empty() && name != "." && name != ".." &&
+               name.find('/') == std::string::npos &&
+               name.find('\\') == std::string::npos &&
+               name.find('\0') == std::string::npos;
+    }
+
+    // convert to status code
+    StatusCode ConvertResultCode(const Status& status) {
+        return status.ok() ? StatusCode::OK : status.error_code();
+    }
+}
+
 DFSClientNodeP1::DFSClientNodeP1() : DFSClientNode() {}
 
 DFSClientNodeP1::~DFSClientNodeP1() noexcept {}
@@ -68,7 +97,6 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
     // StatusCode::NOT_FOUND - if the file cannot be found on the client
     // StatusCode::CANCELLED otherwise
     //
-}
 
 
 StatusCode DFSClientNodeP1::Fetch(const std::string &filename) {
