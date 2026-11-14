@@ -98,6 +98,94 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
     // StatusCode::CANCELLED otherwise
     //
 
+    if (!service_stub || !ValidateFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    const std::string filename_mnt_path = WrapPath(filename);
+
+    struct stat st;
+    if (stat(filename_mnt_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        return StatusCode::NOT_FOUND;
+    }
+
+    // open the file in binary mode for file client want to store
+    // without binary mode, some platforms may perform text-mode transformations, like converting newline chars
+    std::ifstream file_to_store(filename_mnt_path.c_str(), std::ios::binary);
+
+    // file can't be open, panic
+    if (!file_to_store.is_open()) {
+        return StatusCode::NOT_FOUND;
+    }
+
+    ClientContext context;
+    SetDeadline(&context, deadline_timeout);
+
+    FileStatusResponse response;
+
+    // establishing client-side streaming RPC
+    std::unique_ptr writer_chunk_to_server(service_stub->StoreFile(&context, &response));
+
+    bool is_first_message = true;
+    bool write_is_successful = true;
+    char buffer[DFS_BUFFERSIZE];
+    while (file_to_store.good()) {
+        file_to_store.read(buffer, sizeof(buffer));
+
+        const std::streamsize num_bytes_read = file_to_store.gcount();
+
+        // EOF
+        if (num_bytes_read == 0 && !is_first_message) {
+            break;
+        }
+
+        StoreFileRequest request;
+
+        // writing the first message with the metadata
+        if (is_first_message) {
+            request.set_filename(filename);
+            request.set_mtime(st.st_mtime);
+
+            is_first_message = false;
+        }
+
+        if (num_bytes_read > 0) {
+            request.set_content(buffer, static_cast<size_t>(num_bytes_read));
+        }
+
+        // send request to server with the chunk
+        if (!writer_chunk_to_server->Write(request)) {
+            write_is_successful = false;
+            break;
+        }
+
+        if (num_bytes_read == 0) {
+            break; // empty file still sends the filename frame
+        }
+    }
+
+    if (file_to_store.bad()) {
+        write_is_successful = false;
+        context.TryCancel();
+    }
+
+    // tell server that we as client has finished sending messages
+    writer_chunk_to_server->WritesDone();
+
+    // get final status
+    Status status = writer_chunk_to_server->Finish();
+
+    if (!write_is_successful && status.ok()) {
+        return StatusCode::CANCELLED;
+    }
+
+    if (!status.ok()) {
+        dfs_log(LL_ERROR) << "Store failed for " << filename << ": " << status.error_message();
+        return ConvertResultCode(status);
+    }
+
+    return StatusCode::OK;
+}
 
 StatusCode DFSClientNodeP1::Fetch(const std::string &filename) {
 
@@ -120,6 +208,102 @@ StatusCode DFSClientNodeP1::Fetch(const std::string &filename) {
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    if (!service_stub || !ValidateFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    ClientContext context;
+    SetDeadline(&context, deadline_timeout);
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    std::unique_ptr reader_chunk_from_server(service_stub->FetchFile(&context, request));
+
+    const std::string file_destination_path = WrapPath(filename);
+
+    const std::string temporary_file_path = file_destination_path + ".downloaded_file." + std::to_string(static_cast<long long>(::getpid()));
+
+    std::ofstream temp_output_file(temporary_file_path.c_str(), std::ios::binary | std::ios::trunc);
+
+    // unable to open, panic
+    if (!temp_output_file.is_open()) {
+        context.TryCancel();
+        return StatusCode::PERMISSION_DENIED;
+    }
+
+    // read in chunk
+    int64_t mtime = 0;
+    bool has_received_file_meta = false;
+    bool write_is_successful = true;
+    FileChunk curr_chunk;
+    while (reader_chunk_from_server->Read(&curr_chunk)) {
+        // get the file metadata
+        if (!has_received_file_meta) {
+            has_received_file_meta = true;
+            mtime = curr_chunk.mtime();
+
+            if (!curr_chunk.filename().empty() && curr_chunk.filename() != filename) {
+                write_is_successful = false;
+                context.TryCancel();
+                break;
+            }
+        }
+
+        // write when the content is non-empty to the temp file in chunk
+        if (!curr_chunk.content().empty()) {
+            temp_output_file.write(curr_chunk.content().data(), static_cast<std::streamsize>(curr_chunk.content().size()));
+        }
+
+        if (!temp_output_file.good()) {
+            write_is_successful = false;
+            context.TryCancel();
+            break;
+        }
+    }
+
+    // don't forget to close
+    temp_output_file.close();
+
+    if (temp_output_file.fail()) {
+        write_is_successful = false;
+    }
+
+    // get final status
+    Status status = reader_chunk_from_server->Finish();
+
+    if (!status.ok() || !write_is_successful || !has_received_file_meta) {
+        std::remove(temporary_file_path.c_str());
+        if (!status.ok()) {
+            dfs_log(LL_ERROR) << "Fetch failed for " << filename << ": " << status.error_message();
+            return ConvertResultCode(status);
+        }
+        return StatusCode::INTERNAL;
+    }
+
+    {
+        utimbuf file_meta_time{};
+        file_meta_time.actime = static_cast<time_t>(mtime);
+        file_meta_time.modtime = static_cast<time_t>(mtime);
+
+        // set time failed, just delete temp file
+        if (utime(temporary_file_path.c_str(), &file_meta_time) != 0) {
+            std::remove(temporary_file_path.c_str());
+
+            return StatusCode::INTERNAL;
+        }
+    }
+
+    // rename temp file to actual file name
+    if (std::rename(temporary_file_path.c_str(), file_destination_path.c_str()) != 0) {
+        const int rename_err = errno;
+        std::remove(temporary_file_path.c_str());
+        dfs_log(LL_ERROR) << "Cannot commit fetched file: " << std::strerror(rename_err);
+        return rename_err == EACCES ? StatusCode::PERMISSION_DENIED : StatusCode::INTERNAL;
+    }
+
+    return StatusCode::OK;
 }
 
 StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
@@ -138,6 +322,24 @@ StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
     // StatusCode::CANCELLED otherwise
     //
 
+    if (!service_stub || !ValidateFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    ClientContext context;
+    SetDeadline(&context, deadline_timeout);
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    OperationResponse response;
+    Status resp_status = service_stub->DeleteFile(&context, request, &response);
+
+    if (!resp_status.ok()) {
+        dfs_log(LL_ERROR) << "Delete failed for " << filename << ": " << resp_status.error_message();
+    }
+
+    return ConvertResultCode(resp_status);
 }
 
 StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool display) {
@@ -161,6 +363,43 @@ StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool displ
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    if (!service_stub) {
+        return StatusCode::UNAVAILABLE;
+    }
+
+    ClientContext context;
+    SetDeadline(&context, deadline_timeout);
+
+    ListFilesRequest request;
+
+    ListFilesResponse response;
+
+    Status resp_status = service_stub->ListFiles(&context, request, &response);
+
+    if (!resp_status.ok()) {
+        dfs_log(LL_ERROR) << "List failed: " << resp_status.error_message();
+        return ConvertResultCode(resp_status);
+    }
+
+    // clear the file_map if it isn't empty
+    if (file_map) {
+        file_map->clear();
+    }
+
+    for (const auto& file : response.files()) {
+        // set the map with the filename -> mtime
+        if (file_map) {
+            (*file_map)[file.filename()] = static_cast<int>(file.mtime());
+        }
+
+        // print to terminal if flag is set
+        if (display) {
+            std::cout << file.filename() << "\t" << file.mtime() << "\t" << file.size() << " bytes\n";
+        }
+    }
+
+    return StatusCode::OK;
 }
 
 StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status) {
@@ -187,6 +426,38 @@ StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status)
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    if (!service_stub || !ValidateFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    ClientContext context;
+    SetDeadline(&context, deadline_timeout);
+
+    // server request
+    FileRequest request;
+    request.set_filename(filename);
+
+    // server response
+    FileStatusResponse response;
+
+    // call server rpc func
+    Status resp_status = service_stub->GetFileStatus(&context, request, &response);
+
+    // handle error
+    if (!resp_status.ok()) {
+        dfs_log(LL_ERROR) << "File status failed for " << filename << ": " << resp_status.error_message();
+        return ConvertResultCode(resp_status);
+    }
+
+    if (file_status) {
+        // static_cast<FileStatusResponse*>(file_status) converts file_status into a pointer to FileStatusResponse.
+        *static_cast<FileStatusResponse*>(file_status) = response;
+    } else {
+        std::cout << response.filename() << "\n" << "Size: " << response.size() << " bytes\n" << "Modified: " << response.mtime() << "\n";
+    }
+
+    return StatusCode::OK;
 }
 
 //

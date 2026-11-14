@@ -213,12 +213,13 @@ public:
 
         // preserve client source file's mtime so clients can compare versions
         {
-            utimbuf times{};
+            utimbuf file_meta_time{};
 
-            times.actime = static_cast<time_t>(source_mtime);
-            times.modtime = static_cast<time_t>(source_mtime);
+            file_meta_time.actime = static_cast<time_t>(source_mtime);
+            file_meta_time.modtime = static_cast<time_t>(source_mtime);
 
-            if (utime(temporary_file_path.c_str(), &times) != 0) {
+            // set time failed, just delete temp file
+            if (utime(temporary_file_path.c_str(), &file_meta_time) != 0) {
                 std::remove(temporary_file_path.c_str());
 
                 return Status(StatusCode::INTERNAL, "could not set uploaded file timestamp!");
