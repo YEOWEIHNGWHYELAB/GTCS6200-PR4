@@ -135,6 +135,20 @@ public:
     //
 
 
+    Status GetFileStatus(ServerContext* context, const FileRequest* request, FileStatusResponse* response) override {
+        // can use the following to test deadline, set less than 4 second
+        // std::this_thread::sleep_for(std::chrono::seconds(4));
+
+        if (!ValidateFilename(request->filename())) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid filename");
+        }
+
+        if (!FillFileStatus(WrapPath(request->filename()), request->filename(), response)) {
+            return Status(StatusCode::NOT_FOUND, "file not found");
+        }
+
+        return Status::OK;
+    }
 };
 
 //
