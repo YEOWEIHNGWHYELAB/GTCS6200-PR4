@@ -7,26 +7,88 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
+    rpc StoreFile(stream StoreFileRequest) returns (FileStatusResponse);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
+    rpc FetchFile(FileRequest) returns (stream FileChunk);
 
     // 3. REQUIRED (Parts 1 & 2): A method to list all files on the server
+    rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
 
     // 4. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+    rpc GetFileStatus(FileRequest) returns (FileStatusResponse);
 
     // 5. REQUIRED (Part 2 only): A method to request a write lock from the server
+    rpc RequestWriteLock(WriteLockRequest) returns (FileOpResponse);
 
     // 6. REQUIRED (Part 2 only): A method named CallbackList to handle asynchronous file listing requests
     //                            from a client. This method should return a listing of files along with their
     //                            attribute information. The expected attribute information should include name,
     //                            size, and modified time.
+    rpc CallbackList(FileRequest) returns (FileList);
 
     // 7. REQUIRED (Part 2 only): A method to delete a file from the server
+    rpc DeleteFile(FileRequest) returns (FileOpResponse);
 
     // 8. Any other methods you deem necessary to complete the tasks of this assignment
-
-
+    rpc ReleaseWriteLock(WriteLockRequest) returns (FileOpResponse);
 }
 
 // Add your message types here
 
+message FileInfo {
+    string filename = 1;
+    uint64 size = 2;
+    int64 mtime = 3;
+    uint32 crc = 4;
+}
+
+message FileRequest {
+    string filename = 1;
+
+    // The async client scaffold uses the generic field name.
+    string name = 2;
+    string client_id = 3;
+}
+
+message StoreFileRequest {
+    string filename = 1;
+    bytes content = 2;
+    int64 mtime = 3;
+    string client_id = 4;
+    uint32 crc = 5;
+}
+
+message FileChunk {
+    string filename = 1;
+    bytes content = 2;
+    int64 mtime = 3;
+    uint32 crc = 4;
+}
+
+message FileStatusResponse {
+    string filename = 1;
+    uint64 size = 2;
+    int64 mtime = 3;
+    uint32 crc = 4;
+}
+
+message FileOpResponse {
+    string filename = 1;
+}
+
+message ListFilesRequest {}
+
+message ListFilesResponse {
+    repeated FileInfo files = 1;
+}
+
+message WriteLockRequest {
+    string filename = 1;
+    string client_id = 2;
+}
+
+message FileList {
+    repeated FileInfo files = 1;
+    repeated string deleted_files = 2;
+}
