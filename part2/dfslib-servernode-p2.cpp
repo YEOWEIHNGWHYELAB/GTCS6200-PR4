@@ -249,14 +249,20 @@ DFSServerNode::~DFSServerNode() noexcept {
     dfs_log(LL_SYSINFO) << "DFSServerNode shutting down";
 }
 
+void DFSServerNode::Shutdown() {
+    if (server) {
+        server->Shutdown();
+    }
+}
+
 /**
  * Start the DFSServerNode server
  */
 void DFSServerNode::Start() {
-    DFSServiceImpl service(this->mount_path, this->server_address, this->num_async_threads);
+    DFSServiceImpl service(mount_path, server_address, num_async_threads);
 
 
-    dfs_log(LL_SYSINFO) << "DFSServerNode server listening on " << this->server_address;
+    dfs_log(LL_SYSINFO) << "DFSServerNode server listening on " << server_address;
     service.Run();
 }
 
