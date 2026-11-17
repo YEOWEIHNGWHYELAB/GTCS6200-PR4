@@ -136,8 +136,8 @@ private:
     // so even listing files requires this
     std::mutex filesystem_mutex;
 
-    // ensure mutual exlusion access to write_locks_map
-    std::mutex write_locks_map_mutex;
+    // ensure mutual exclusion access to write_locks_map and for deleted_files_set
+    std::mutex write_lock_mutex;
 
     // tracks which client currently owns the write lock for each file
     std::map<std::string, std::string> write_locks_map;
@@ -147,7 +147,7 @@ private:
 
 
     void ReleaseFileWriteLock(const std::string& filename, const std::string& client) {
-        std::lock_guard<std::mutex> write_lock_mtx(write_locks_map_mutex);
+        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
 
         // find the filename key entry and delete the entry
         auto curr_it = write_locks_map.find(filename);
@@ -157,7 +157,7 @@ private:
     }
 
     bool DoesClientOwnWriteLock(const std::string& filename, const std::string& client) {
-        std::lock_guard<std::mutex> write_lock_mtx(write_locks_map_mutex);
+        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
 
         auto curr_it = write_locks_map.find(filename);
 
@@ -232,13 +232,54 @@ public:
         // is aware of. The client will then need to make the appropriate calls based on those changes.
         //
 
+        // lock the file system mutex first
+        std::lock_guard<std::mutex> fs_mtx(filesystem_mutex);
+
+        DIR* mount_dir = opendir(mount_path.c_str());
+
+        if (mount_dir) {
+            dirent* dir_entry;
+            while ((dir_entry = readdir(mount_dir)) != nullptr) {
+                std::string filename(dir_entry->d_name);
+                if (filename == "." || filename == ".." ||
+                    filename.compare(0, TEMP_PREFIX.size(), TEMP_PREFIX) == 0 || // ensure that filename don't start with the TEMP_PREFIX
+                    !ValidateFilename(filename)) {
+                    continue;
+                }
+
+                struct stat st{};
+                std::string path = WrapPath(filename);
+                if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+                    continue;
+                }
+
+                // add file to the response
+                FileInfo* added_file = response->add_files();
+
+                added_file->set_filename(filename);
+                added_file->set_mtime(st.st_mtime);
+                added_file->set_size(static_cast<uint64_t>(st.st_size));
+                added_file->set_crc(dfs_file_checksum(path, &crc_table));
+            }
+
+            // don't forget to close
+            closedir(mount_dir);
+        }
+
+        // remember to lock the write lock before accessing deleted files set
+        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
+
+        // add the deletion file to response from the set
+        for (const auto& name : deleted_files_set) {
+            response->add_deleted_files(name);
+        }
     }
 
     /**
      * Processes the queued requests in the queue thread
      */
     void ProcessQueuedRequests() {
-        while(true) {
+        while (true) {
 
             //
             // STUDENT INSTRUCTION:
