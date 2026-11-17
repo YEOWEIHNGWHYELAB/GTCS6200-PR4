@@ -1,8 +1,12 @@
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <cerrno>
+#include <set>
 #include <string>
 #include <thread>
 #include <errno.h>
@@ -11,6 +15,9 @@
 #include <getopt.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <utime.h>
+#include <unistd.h>
+
 #include <grpcpp/grpcpp.h>
 
 #include "proto-src/dfs-service.grpc.pb.h"
@@ -27,8 +34,7 @@ using grpc::ServerWriter;
 using grpc::ServerContext;
 using grpc::ServerBuilder;
 
-using dfs_service::DFSService;
-
+using namespace dfs_service;
 
 //
 // STUDENT INSTRUCTION:
@@ -239,9 +245,10 @@ DFSServerNode::DFSServerNode(const std::string &server_address,
         int num_async_threads,
         std::function<void()> callback) :
         server_address(server_address),
-        mount_path(mount_path),
+        mount_path(dfs_clean_path(mount_path)),
         num_async_threads(num_async_threads),
-        grader_callback(callback) {}
+        grader_callback(std::move(callback) // avoid unnecessary copying
+    ) {}
 /**
  * Server shutdown
  */
