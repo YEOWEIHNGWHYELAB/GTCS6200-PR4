@@ -198,15 +198,13 @@ public:
      * @param cq
      * @param tag
      */
-    void RequestCallback(grpc::ServerContext* context,
-                         FileRequestType* request,
-                         grpc::ServerAsyncResponseWriter<FileListResponseType>* response,
-                         grpc::ServerCompletionQueue* cq,
-                         void* tag) {
-
+    void RequestCallback(ServerContext* context,
+                        FileRequest* request,
+                        grpc::ServerAsyncResponseWriter<FileList>* response,
+                        grpc::ServerCompletionQueue* cq,
+                        void* tag) override {
         std::lock_guard<std::mutex> lock(queue_mutex);
-        this->queued_tags.emplace_back(context, request, response, cq, tag);
-
+        queued_tags.emplace_back(context, request, response, cq, tag);
     }
 
     /**
@@ -222,7 +220,7 @@ public:
      * @param request
      * @param response
      */
-    void ProcessCallback(ServerContext* context, FileRequestType* request, FileListResponseType* response) {
+    void ProcessCallback(ServerContext*, FileRequest*, FileList* response) override {
 
         //
         // STUDENT INSTRUCTION:
