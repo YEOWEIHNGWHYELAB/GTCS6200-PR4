@@ -100,14 +100,14 @@ namespace {
 //
 //      - Hint: as the crc checksum is a simple integer, you can pass it around inside your message types.
 //
-class DFSServiceImpl final :
-    public DFSService::WithAsyncMethod_CallbackList<DFSService::Service>,
-        public DFSCallDataManager<FileRequestType , FileListResponseType> {
+
+class DFSServiceImpl final : public DFSService::WithAsyncMethod_CallbackList<DFSService::Service>,
+                             public DFSCallDataManager<FileRequest, FileList> {
 
 private:
 
     /** The runner service used to start the service and manage asynchronicity **/
-    DFSServiceRunner<FileRequestType, FileListResponseType> runner;
+    DFSServiceRunner<FileRequest, FileList> runner;
 
     /** The mount path for the server **/
     std::string mount_path;
@@ -116,8 +116,7 @@ private:
     std::mutex queue_mutex;
 
     /** The vector of queued tags used to manage asynchronous requests **/
-    std::vector<QueueRequest<FileRequestType, FileListResponseType>> queued_tags;
-
+    std::vector<QueueRequest<FileRequest, FileList>> queued_tags;
 
     /**
      * Prepend the mount path to the filename.
@@ -132,24 +131,57 @@ private:
     /** CRC Table kept in memory for faster calculations **/
     CRC::Table<std::uint32_t, 32> crc_table;
 
+
+    // filesystem operation mutex, note that reading and writing filesystem concurrently can cause inconsistent results
+    // so even listing files requires this
+    std::mutex filesystem_mutex;
+
+    // ensure mutual exlusion access to write_locks_map
+    std::mutex write_locks_map_mutex;
+
+    // tracks which client currently owns the write lock for each file
+    std::map<std::string, std::string> write_locks_map;
+
+    // stores filenames that have been deleted on the server
+    std::set<std::string> deleted_files_set;
+
+
+    void ReleaseFileWriteLock(const std::string& filename, const std::string& client) {
+        std::lock_guard<std::mutex> write_lock_mtx(write_locks_map_mutex);
+
+        // find the filename key entry and delete the entry
+        auto curr_it = write_locks_map.find(filename);
+        if (curr_it != write_locks_map.end() && curr_it->second == client) {
+            write_locks_map.erase(curr_it);
+        }
+    }
+
+    bool DoesClientOwnWriteLock(const std::string& filename, const std::string& client) {
+        std::lock_guard<std::mutex> write_lock_mtx(write_locks_map_mutex);
+
+        auto curr_it = write_locks_map.find(filename);
+
+        return curr_it != write_locks_map.end() && curr_it->second == client && !client.empty();
+    }
+
 public:
 
     DFSServiceImpl(const std::string& mount_path, const std::string& server_address, int num_async_threads):
-        mount_path(mount_path), crc_table(CRC::CRC_32()) {
+        mount_path(dfs_clean_path(mount_path)), crc_table(CRC::CRC_32()) {
 
-        this->runner.SetService(this);
-        this->runner.SetAddress(server_address);
-        this->runner.SetNumThreads(num_async_threads);
-        this->runner.SetQueuedRequestsCallback([&]{ this->ProcessQueuedRequests(); });
+        runner.SetService(this);
+        runner.SetAddress(server_address);
+        runner.SetNumThreads(num_async_threads);
+        runner.SetQueuedRequestsCallback([this]{ ProcessQueuedRequests(); });
 
     }
 
     ~DFSServiceImpl() {
-        this->runner.Shutdown();
+        runner.Shutdown();
     }
 
     void Run() {
-        this->runner.Run();
+        runner.Run();
     }
 
     /**
