@@ -43,10 +43,38 @@ using namespace dfs_service;
 // message types you are using in your `dfs-service.proto` file
 // to indicate a file request and a listing of files from the server
 //
-using FileRequestType = FileRequest;
-using FileListResponseType = FileList;
 
 extern dfs_log_level_e DFS_LOG_LEVEL;
+
+namespace {
+
+    const std::string TEMP_PREFIX = ".dfs-tmp-upload-";
+
+    bool ValidateFilename(const std::string& name) {
+        return !name.empty() && name != "." && name != ".." &&
+               name[0] != '.' &&
+               name.find('/') == std::string::npos &&
+               name.find('\\') == std::string::npos &&
+               name.find('\0') == std::string::npos;
+    }
+
+    bool FillStatus(const std::string& path, const std::string& filename, FileStatusResponse* resp, CRC::Table<std::uint32_t, 32>* table) {
+        struct stat st{};
+
+        // // S_ISREG() checks if file is a regular file, not a sym link
+        if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+            return false;
+        }
+
+        resp->set_filename(filename);
+        resp->set_size(static_cast<uint64_t>(st.st_size));
+        resp->set_mtime(static_cast<int64_t>(st.st_mtime));
+        resp->set_crc(dfs_file_checksum(path, table));
+
+        return true;
+    }
+
+}
 
 //
 // STUDENT INSTRUCTION:
