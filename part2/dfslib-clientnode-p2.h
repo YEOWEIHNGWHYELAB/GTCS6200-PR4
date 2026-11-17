@@ -1,6 +1,7 @@
 #ifndef PR4_DFSLIB_CLIENTNODE_H
 #define PR4_DFSLIB_CLIENTNODE_H
 
+#include <functional>
 #include <string>
 #include <vector>
 #include <map>
@@ -42,7 +43,7 @@ public:
      * @param filename
      * @return bool
      */
-    grpc::StatusCode RequestWriteAccess(const std::string& filename) override ;
+    grpc::StatusCode RequestWriteAccess(const std::string& filename) override;
 
     /**
      * Store a file from the mount path on to the RPC server
@@ -50,7 +51,7 @@ public:
      * @param filename
      * @return grpc::StatusCode
      */
-    grpc::StatusCode Store(const std::string& filename) override ;
+    grpc::StatusCode Store(const std::string& filename) override;
 
     /**
      * Fetch a file from the RPC server and put it in the mount path
@@ -58,7 +59,7 @@ public:
      * @param filename
      * @return grpc::StatusCode
      */
-    grpc::StatusCode Fetch(const std::string& filename) override ;
+    grpc::StatusCode Fetch(const std::string& filename) override;
 
     /**
      * Delete a file from the RPC server
@@ -66,7 +67,7 @@ public:
      * @param filename
      * @return grpc::StatusCode
      */
-    grpc::StatusCode Delete(const std::string& filename) override ;
+    grpc::StatusCode Delete(const std::string& filename) override;
 
     /**
      * Get or print a list from the RPC server.
@@ -117,7 +118,7 @@ public:
     /**
      * Initialize the callback list
      */
-     void InitCallbackList() override;
+    void InitCallbackList() override;
 
     /**
      * Watcher wrapper
@@ -141,6 +142,14 @@ public:
     //
     // You may add any additional declarations of methods or variables that you need here.
     //
+
+private:
+
+    std::mutex sync_mutex;
+
+    bool IsValidFilename(const std::string& filename) const;
+
+    void Reconcile(const dfs_service::FileList& listing);
 
 
 };
