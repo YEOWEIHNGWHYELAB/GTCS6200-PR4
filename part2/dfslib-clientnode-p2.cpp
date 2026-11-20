@@ -605,7 +605,7 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
     // the async thread when a file event has been signaled?
     //
 
-    std::lock_guard lock(sync_mutex);
+    std::lock_guard sync_lock_mtx(sync_mutex);
 
     // for example -> Store("test.txt");
     callback();
@@ -735,63 +735,32 @@ void DFSClientNodeP2::HandleCallbackList() {
 
     // Block until the next result is available in the completion queue.
     while (completion_queue.Next(&tag, &ok)) {
-        {
-            //
-            // STUDENT INSTRUCTION:
-            //
-            // Consider adding a critical section or RAII style lock here
-            //
 
-            // The tag is the memory location of the call_data object
-            AsyncClientData<FileListResponseType> *call_data = static_cast<AsyncClientData<FileListResponseType> *>(tag);
+        //
+        // STUDENT INSTRUCTION:
+        //
+        // Consider adding a critical section or RAII style lock here
+        //
 
-            dfs_log(LL_DEBUG2) << "Received completion queue callback";
+        // The tag is the memory location of the call_data object
+        // retrieve resp from server
+        std::unique_ptr<AsyncClientData<FileList>> callback_list_info(static_cast<AsyncClientData<FileList>*>(tag));
 
-            // Verify that the request was completed successfully. Note that "ok"
-            // corresponds solely to the request for updates introduced by Finish().
-            // GPR_ASSERT(ok);
-            if (!ok) {
-                dfs_log(LL_ERROR) << "Completion queue callback not ok.";
-            }
+        if (ok && callback_list_info->status.ok() && !Unmounting()) {
+            std::lock_guard sync_lock_mtx(sync_mutex);
 
-            if (ok && call_data->status.ok()) {
-
-                dfs_log(LL_DEBUG3) << "Handling async callback ";
-
-                //
-                // STUDENT INSTRUCTION:
-                //
-                // Add your handling of the asynchronous event calls here.
-                // For example, based on the file listing returned from the server,
-                // how should the client respond to this updated information?
-                // Should it retrieve an updated version of the file?
-                // Send an update to the server?
-                // Do nothing?
-                //
-
-
-
-            } else {
-                dfs_log(LL_ERROR) << "Status was not ok. Will try again in " << DFS_RESET_TIMEOUT << " milliseconds.";
-                dfs_log(LL_ERROR) << call_data->status.error_message();
-                std::this_thread::sleep_for(std::chrono::milliseconds(DFS_RESET_TIMEOUT));
-            }
-
-            // Once we're complete, deallocate the call_data object.
-            delete call_data;
-
-            //
-            // STUDENT INSTRUCTION:
-            //
-            // Add any additional syncing/locking mechanisms you may need here
-
+            // start to reconcile onto local
+            Reconcile(callback_list_info->reply);
+        } else if (!Unmounting()) {
+            dfs_log(LL_ERROR) << "CallbackList failure: " << callback_list_info->status.error_message();
+            std::this_thread::sleep_for(std::chrono::milliseconds(DFS_RESET_TIMEOUT));
         }
 
-
-        // Start the process over and wait for the next callback response
-        dfs_log(LL_DEBUG3) << "Calling InitCallbackList";
-        InitCallbackList();
-
+        // wait before we register the next callback request
+        if (!Unmounting()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            InitCallbackList();
+        }
     }
 }
 
