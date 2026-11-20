@@ -577,6 +577,13 @@ grpc::StatusCode DFSClientNodeP2::Stat(const std::string &filename, void* file_s
     return StatusCode::OK;
 }
 
+/**
+ * The following method is part of the flow:
+ *
+ * 1. DFSClient::InotifyWatcher() — listens for filesystem events
+ * 2. DFSClientNodeP2::InotifyWatcherCallback() — provides synchronization using sync_mutex (part of the DFSClientNodeP2 class)
+ * 3. DFSClient::InotifyEventCallback() — decides whether to call Store() or Delete() to sync to server
+ */
 void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
 
     //
@@ -598,8 +605,12 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
     // the async thread when a file event has been signaled?
     //
 
+    std::lock_guard lock(sync_mutex);
 
+    // for example -> Store("test.txt");
     callback();
+}
+
 
 }
 
