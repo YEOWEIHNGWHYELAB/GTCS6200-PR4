@@ -324,7 +324,7 @@ public:
             return Status(StatusCode::INVALID_ARGUMENT, "invalid filename or client id");
         }
 
-        std::lock_guard lock(write_lock_mutex);
+        std::lock_guard write_lock_mtx(write_lock_mutex);
 
         auto curr_it = write_locks_map.find(req->filename());
 
@@ -356,7 +356,75 @@ public:
     }
 
             }
+
+    Status DeleteFile(ServerContext*, const FileRequest* req, FileOpResponse* resp) override {
+        if (!ValidateFilename(req->filename()) || req->client_id().empty()) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid delete request");
         }
+
+        // check if the client can delete the file or not
+        if (!DoesClientOwnWriteLock(req->filename(), req->client_id())) {
+            return Status(StatusCode::PERMISSION_DENIED, "client does not own write lock");
+        }
+
+        // lock mutex then delete the file
+        {
+            std::lock_guard fs_mtx(filesystem_mutex);
+            if (std::remove(WrapPath(req->filename()).c_str()) != 0 && errno != ENOENT) {
+                // panic, failure to delete release lock first before returning error
+                ReleaseFileWriteLock(req->filename(), req->client_id());
+                return Status(StatusCode::PERMISSION_DENIED, std::strerror(errno));
+            }
+        }
+
+        // update the deleted file set and to remove the write lock map entry for the deleted file
+        {
+            std::lock_guard write_lock_mtx(write_lock_mutex);
+            deleted_files_set.insert(req->filename());
+            write_locks_map.erase(req->filename());
+        }
+
+        // remember to return the common file operation resp
+        resp->set_filename(req->filename());
+        
+        return Status::OK;
+    }
+
+    Status ListFiles(ServerContext*, const ListFilesRequest*, ListFilesResponse* resp) override {
+        // must lock first
+        std::lock_guard fs_mtx(filesystem_mutex);
+
+        DIR* dir = opendir(mount_path.c_str());
+        if (!dir) {
+            return Status(StatusCode::NOT_FOUND, "mount directory not available");
+        }
+
+        // walk through the dir and then add it into the list of file info to return to client as resp
+        dirent* dir_entry;
+        while ((dir_entry = readdir(dir)) != nullptr) {
+            std::string name(dir_entry->d_name);
+            if (name == "." || name == ".." || name.compare(0,TEMP_PREFIX.size(),TEMP_PREFIX)==0 || !ValidateFilename(name)) {
+                continue;
+            }
+
+            struct stat st{};
+
+            std::string path = WrapPath(name);
+            if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+                continue;
+            }
+
+            auto* added_file = resp->add_files();
+            added_file->set_filename(name); added_file->set_mtime(st.st_mtime);
+            added_file->set_size(static_cast<uint64_t>(st.st_size));
+            added_file->set_crc(dfs_file_checksum(path, &crc_table));
+        }
+
+        // don't forget close
+        closedir(dir);
+
+        return Status::OK;
+    }
 
     Status GetFileStatus(ServerContext*, const FileRequest* req, FileStatusResponse* resp) override {
         if (!ValidateFilename(req->filename())) {
