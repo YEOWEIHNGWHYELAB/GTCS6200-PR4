@@ -549,6 +549,32 @@ grpc::StatusCode DFSClientNodeP2::Stat(const std::string &filename, void* file_s
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    if (!service_stub || !IsValidFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    FileRequest file_req;
+    file_req.set_filename(filename);
+
+    FileStatusResponse file_Status_resp;
+    
+    Status status = service_stub->GetFileStatus(&ctx, file_req, &file_Status_resp);
+
+    if (!status.ok()) {
+        return status.error_code();
+    }
+
+    if (file_status) {
+        *static_cast<FileStatusResponse*>(file_status) = file_Status_resp;
+    } else {
+        std::cout << file_Status_resp.filename() << "\t" << file_Status_resp.size() << "\t" << file_Status_resp.mtime() << std::endl;
+    }
+
+    return StatusCode::OK;
 }
 
 void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
