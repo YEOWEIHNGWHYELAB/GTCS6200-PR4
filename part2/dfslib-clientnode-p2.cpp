@@ -611,7 +611,94 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
     callback();
 }
 
+// this basically compare files on the server with the files on local client, then synchronize them
+void DFSClientNodeP2::Reconcile(const FileList& listing) {
+    // Apply server deletion notifications first, so stale local copies are not re-uploaded.
+    std::set<std::string> deleted_set;
+    for (const auto& curr_deleted_file : listing.deleted_files()) {
+        if (!IsValidFilename(curr_deleted_file)) {
+            continue;
+        }
 
+        deleted_set.insert(curr_deleted_file);
+
+        std::string delete_filename = WrapPath(curr_deleted_file);
+
+        std::remove(delete_filename.c_str());
+    }
+
+    // map of the server file that maps filename to the file
+    std::map<std::string, FileInfo> server_filename_fileinfo_map;
+    for (const auto& curr_file : listing.files()) {
+        if (IsValidFilename(curr_file.filename())) {
+            server_filename_fileinfo_map[curr_file.filename()] = curr_file;
+        }
+    }
+
+    // server-side files: fetch missing / stale local copies, or decide which local copy to upload
+    for (const auto& sever_file_info_entry : server_filename_fileinfo_map) {
+        const std::string& filename = sever_file_info_entry.first;
+        const FileInfo& server_file_info = sever_file_info_entry.second;
+
+        const std::string local_path = WrapPath(filename);
+
+        struct stat st{};
+        if (!GetLocalStat(local_path, &st)) {
+            Fetch(filename);
+            continue;
+        }
+
+        // assignment defines mtime as the conflict winner and equal modification times require no
+        // synchronization, even if CRCs differ...
+        if (st.st_mtime == server_file_info.mtime()) {
+            continue;
+        }
+
+        std::uint32_t local_crc_checksum = dfs_file_checksum(local_path, &crc_table);
+
+        if (local_crc_checksum == server_file_info.crc()) {
+            // same bytes, but differ in time
+            if (st.st_mtime > server_file_info.mtime()) {
+                Store(filename);
+            } else {
+                Fetch(filename);
+            }
+        } else if (st.st_mtime > server_file_info.mtime()) {
+            // local later than server
+            Store(filename);
+        } else {
+            // server later than local
+            Fetch(filename);
+        }
+    }
+
+    // on initial mount (and subsequent passes), local-only files are new client files
+    DIR* dir = opendir(MountPath().c_str());
+    if (!dir) {
+        return;
+    }
+
+    // walk through directory to find file that aren't on server
+    dirent* dir_entry;
+    while ((dir_entry = readdir(dir)) != nullptr) {
+        std::string filename(dir_entry->d_name);
+
+        if (!IsValidFilename(filename) ||
+            deleted_set.count(filename) || // deleted set contains the filename
+            server_filename_fileinfo_map.count(filename)) {
+            continue;
+        }
+
+        std::string file_not_on_server = WrapPath(filename);
+
+        struct stat st{};
+        if (GetLocalStat(file_not_on_server, &st)) {
+            Store(filename);
+        }
+    }
+
+    // remember to close...
+    closedir(dir);
 }
 
 //
