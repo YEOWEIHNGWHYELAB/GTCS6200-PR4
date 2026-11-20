@@ -68,7 +68,7 @@ namespace {
 
         resp->set_filename(filename);
         resp->set_size(static_cast<uint64_t>(st.st_size));
-        resp->set_mtime(static_cast<int64_t>(st.st_mtime));
+        resp->set_mtime(st.st_mtime);
         resp->set_crc(dfs_file_checksum(path, table));
 
         return true;
@@ -147,7 +147,7 @@ private:
 
 
     void ReleaseFileWriteLock(const std::string& filename, const std::string& client) {
-        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
+        std::lock_guard write_lock_mtx(write_lock_mutex);
 
         // find the filename key entry and delete the entry
         auto curr_it = write_locks_map.find(filename);
@@ -157,7 +157,7 @@ private:
     }
 
     bool DoesClientOwnWriteLock(const std::string& filename, const std::string& client) {
-        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
+        std::lock_guard write_lock_mtx(write_lock_mutex);
 
         auto curr_it = write_locks_map.find(filename);
 
@@ -203,7 +203,7 @@ public:
                         grpc::ServerAsyncResponseWriter<FileList>* response,
                         grpc::ServerCompletionQueue* cq,
                         void* tag) override {
-        std::lock_guard<std::mutex> lock(queue_mutex);
+        std::lock_guard lock(queue_mutex);
         queued_tags.emplace_back(context, request, response, cq, tag);
     }
 
@@ -233,7 +233,7 @@ public:
         //
 
         // lock the file system mutex first
-        std::lock_guard<std::mutex> fs_mtx(filesystem_mutex);
+        std::lock_guard fs_mtx(filesystem_mutex);
 
         DIR* mount_dir = opendir(mount_path.c_str());
 
@@ -267,7 +267,7 @@ public:
         }
 
         // remember to lock the write lock before accessing deleted files set
-        std::lock_guard<std::mutex> write_lock_mtx(write_lock_mutex);
+        std::lock_guard write_lock_mtx(write_lock_mutex);
 
         // add the deletion file to response from the set
         for (const auto& name : deleted_files_set) {
@@ -294,22 +294,27 @@ public:
 
             // Guarded section for queue
             {
-                dfs_log(LL_DEBUG2) << "Waiting for queue guard";
-                std::lock_guard<std::mutex> lock(queue_mutex);
+                // dfs_log(LL_DEBUG2) << "Waiting for queue guard";
+                std::lock_guard lock(queue_mutex);
 
 
-                for(QueueRequest<FileRequestType, FileListResponseType>& queue_request : this->queued_tags) {
-                    this->RequestCallbackList(queue_request.context, queue_request.request,
-                        queue_request.response, queue_request.cq, queue_request.cq, queue_request.tag);
-                    queue_request.finished = true;
+                for (auto& queue_req : queued_tags) {
+                    this->RequestCallbackList(queue_req.context, queue_req.request,
+                        queue_req.response, queue_req.cq, queue_req.cq, queue_req.tag);
+                    queue_req.finished = true;
                 }
 
                 // any finished tags first
-                this->queued_tags.erase(std::remove_if(
-                    this->queued_tags.begin(),
-                    this->queued_tags.end(),
-                    [](QueueRequest<FileRequestType, FileListResponseType>& queue_request) { return queue_request.finished; }
-                ), this->queued_tags.end());
+                queued_tags.erase(std::remove_if(
+                    queued_tags.begin(),
+                    queued_tags.end(),
+                    [](const QueueRequest<FileRequest,FileList>& queue_request){ return queue_request.finished; }
+                ), queued_tags.end());
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
 
             }
         }
