@@ -613,7 +613,7 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
 //
 void DFSClientNodeP2::HandleCallbackList() {
 
-    void* tag;
+    void* tag = nullptr;
 
     bool ok = false;
 
@@ -706,7 +706,11 @@ void DFSClientNodeP2::HandleCallbackList() {
  * give you a chance to focus more on the project's requirements.
  */
 void DFSClientNodeP2::InitCallbackList() {
-    CallbackList<FileRequestType, FileListResponseType>();
+    if (!service_stub || Unmounting()) {
+        return;
+    }
+
+    CallbackList<FileRequest, FileList>();
 }
 
 //
