@@ -250,8 +250,8 @@ public:
                 }
 
                 struct stat st{};
-                std::string path = WrapPath(filename);
-                if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+                std::string file_destination_path = WrapPath(filename);
+                if (lstat(file_destination_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
                     continue;
                 }
 
@@ -261,7 +261,7 @@ public:
                 added_file->set_filename(filename);
                 added_file->set_mtime(st.st_mtime);
                 added_file->set_size(static_cast<uint64_t>(st.st_size));
-                added_file->set_crc(dfs_file_checksum(path, &crc_table));
+                added_file->set_crc(dfs_file_checksum(file_destination_path, &crc_table));
             }
 
             // don't forget to close

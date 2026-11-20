@@ -7,6 +7,8 @@
 #include <chrono>
 #include <errno.h>
 #include <csignal>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -14,6 +16,9 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <limits.h>
+#include <dirent.h>
+#include <set>
+#include <sys/stat.h>
 #include <sys/inotify.h>
 #include <grpcpp/grpcpp.h>
 #include <utime.h>
@@ -31,6 +36,8 @@ using grpc::ClientWriter;
 using grpc::ClientReader;
 using grpc::ClientContext;
 
+using namespace dfs_service;
+
 extern dfs_log_level_e DFS_LOG_LEVEL;
 
 //
@@ -40,11 +47,38 @@ extern dfs_log_level_e DFS_LOG_LEVEL;
 // message types you are using to indicate
 // a file request and a listing of files from the server.
 //
-using FileRequestType = FileRequest;
-using FileListResponseType = FileList;
 
-DFSClientNodeP2::DFSClientNodeP2() : DFSClientNode() {}
-DFSClientNodeP2::~DFSClientNodeP2() {}
+namespace {
+    void SetDeadline(ClientContext* ctx, int timeout) {
+        ctx->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeout > 0 ? timeout : 12000));
+    }
+
+    bool ValidateFilename(const std::string& name) {
+        return !name.empty() && name != "." && name != ".." &&
+               name[0] != '.' &&
+               name.find('/') == std::string::npos &&
+               name.find('\\') == std::string::npos &&
+               name.find('\0') == std::string::npos;
+    }
+
+    StatusCode ConvertResultCode(const Status& s) {
+        return s.ok() ? StatusCode::OK : s.error_code();
+    }
+
+    bool GetLocalStat(const std::string& path, struct stat* st) {
+        return lstat(path.c_str(), st) == 0 && S_ISREG(st->st_mode);
+    }
+}
+
+DFSClientNodeP2::DFSClientNodeP2() : DFSClientNode() {
+    deadline_timeout = 12000;
+}
+
+DFSClientNodeP2::~DFSClientNodeP2() { completion_queue.Shutdown(); }
+
+bool DFSClientNodeP2::IsValidFilename(const std::string& filename) const {
+    return ValidateFilename(filename);
+}
 
 grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename) {
 
@@ -66,6 +100,24 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
     //
     //
 
+    if (!service_stub || !IsValidFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    WriteLockRequest req;
+    req.set_filename(filename);
+    req.set_client_id(ClientId());
+
+    FileOpResponse response;
+
+    // request with a context deadline
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    // rpc call to server
+    Status status = service_stub->RequestWriteLock(&ctx, req, &response);
+
+    return ConvertResultCode(status);
 }
 
 grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
@@ -95,8 +147,141 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
     //
     //
 
-}
+    if (!service_stub || !IsValidFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
 
+    const std::string file_destination_path = WrapPath(filename);
+
+    struct stat st{};
+    if (!GetLocalStat(file_destination_path, &st)) {
+        return StatusCode::NOT_FOUND;
+    }
+
+    std::ifstream file_to_store(file_destination_path, std::ios::binary);
+    if (!file_to_store.is_open()) {
+        return StatusCode::NOT_FOUND;
+    }
+
+    // need request for the write access
+    StatusCode write_access_lock_status = RequestWriteAccess(filename);
+    if (write_access_lock_status != StatusCode::OK) {
+        return write_access_lock_status;
+    }
+
+    // for releasing the write clock by calling server ReleaseWriteLock rpc
+    auto release_write_lock = [&]() {
+        WriteLockRequest write_lock_req;
+        write_lock_req.set_filename(filename);
+        write_lock_req.set_client_id(ClientId());
+
+        FileOpResponse ignored_file_op_resp;
+
+        ClientContext release_ctx;
+        SetDeadline(&release_ctx, deadline_timeout);
+
+        service_stub->ReleaseWriteLock(&release_ctx, write_lock_req, &ignored_file_op_resp);
+    };
+
+    // the check sum will be used to compare the contents of local file against server's version
+    const std::uint32_t crc_checksum = dfs_file_checksum(file_destination_path, &crc_table);
+
+    FileRequest file_req;
+    file_req.set_filename(filename);
+
+    // check server's existing file version metadata using GetFileStatus()
+    // client then compares server's modification time with its own
+    {
+        FileStatusResponse file_status_resp;
+        ClientContext status_ctx;
+        SetDeadline(&status_ctx, deadline_timeout);
+
+        Status file_status = service_stub->GetFileStatus(&status_ctx, file_req, &file_status_resp);
+
+        if (file_status.ok()) {
+            // newer server version wins. Identical data only needs its mtime
+            // reconciled; otherwise the newer local version may be uploaded.
+            if (file_status_resp.mtime() >= st.st_mtime) {
+
+                // the file content are the same, but server file has timing later than client
+                // so we update client file time, no need to transfer file
+                if (file_status_resp.crc() == crc_checksum && file_status_resp.mtime() != st.st_mtime) {
+                    utimbuf file_meta_time{};
+                    file_meta_time.actime = file_status_resp.mtime();
+                    file_meta_time.modtime = file_status_resp.mtime();
+                    utime(file_destination_path.c_str(), &file_meta_time);
+                }
+
+                // can straight away release write lock
+                release_write_lock();
+
+                return StatusCode::ALREADY_EXISTS;
+            }
+        } else if (file_status.error_code() != StatusCode::NOT_FOUND) {
+            // any other error other than NOT_FOUND, we just return
+            release_write_lock();
+
+            return file_status.error_code();
+        }
+    }
+
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    FileStatusResponse file_status_resp;
+    std::unique_ptr writer_chunk_to_server(service_stub->StoreFile(&ctx, &file_status_resp));
+
+    // start writing the file onto server
+    bool is_first_message = true;
+    char buffer[DFS_BUFFERSIZE];
+    while (file_to_store.good()) {
+        file_to_store.read(buffer, sizeof(buffer));
+
+        std::streamsize num_bytes_read = file_to_store.gcount();
+
+        // EOF
+        if (num_bytes_read == 0 && !is_first_message) {
+            break;
+        }
+
+        StoreFileRequest request;
+
+        // write first message
+        if (is_first_message) {
+            request.set_filename(filename);
+            request.set_mtime(st.st_mtime);
+            request.set_client_id(ClientId());
+            request.set_crc(crc_checksum);
+
+            is_first_message = false;
+        }
+
+        if (num_bytes_read > 0) {
+            request.set_content(buffer, static_cast<size_t>(num_bytes_read));
+        }
+
+        if (!writer_chunk_to_server->Write(request)) {
+            break;
+        }
+
+        if (num_bytes_read == 0) {
+            break;
+        }
+    }
+
+    writer_chunk_to_server->WritesDone();
+
+    // final status
+    Status status = writer_chunk_to_server->Finish();
+
+    // The server releases the lock after a successful store. If the transfer
+    // failed before it reached the server's commit path, release it explicitly.
+    if (!status.ok()) {
+        release_write_lock();
+    }
+
+    return ConvertResultCode(status);
+}
 
 grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
 
