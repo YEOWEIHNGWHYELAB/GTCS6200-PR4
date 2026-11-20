@@ -361,8 +361,15 @@ public:
             return Status(StatusCode::INVALID_ARGUMENT, "missing or invalid upload metadata");
         }
 
+        const std::string filename = req.filename();
+        const std::string client_id = req.client_id();
+
+        // Preserve metadata from the FIRST message.
+        // Subsequent messages only contain file chunks.
+        const time_t uploaded_mtime = static_cast<time_t>(req.mtime());
+        const uint32_t uploaded_crc_checksum = req.crc();
+
         // check if client own write lock first
-        const std::string filename = req.filename(), client_id = req.client_id();
         if (!DoesClientOwnWriteLock(filename, client_id)) {
             return Status(StatusCode::PERMISSION_DENIED, "client does not own write lock, reject");
         }
@@ -411,13 +418,19 @@ public:
         }
 
         utimbuf file_meta_time{};
-        file_meta_time.actime = static_cast<time_t>(req.mtime());
-        file_meta_time.modtime = static_cast<time_t>(req.mtime());
+        file_meta_time.actime = uploaded_mtime;
+        file_meta_time.modtime = uploaded_mtime;
 
         if (utime(temporary_file_path.c_str(), &file_meta_time) != 0) {
             std::remove(temporary_file_path.c_str());
             ReleaseFileWriteLock(filename, client_id);
             return Status(StatusCode::INTERNAL, "unable to preserve mtime");
+        }
+
+        if (dfs_file_checksum(temporary_file_path, &crc_table) != uploaded_crc_checksum) {
+            std::remove(temporary_file_path.c_str());
+            ReleaseFileWriteLock(filename, client_id);
+            return Status(StatusCode::DATA_LOSS, "upload checksum mismatch");
         }
 
         {

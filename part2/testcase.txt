@@ -1,0 +1,16 @@
+Test with multiple clients syncing with a gRPC service
+{
+  "client_console": "-S: Client foo connecting to server at 0.0.0.0:8202\n-S: Mounting on mnt/bvt_client/\n-S: Client bar connecting to server at 0.0.0.0:8202\n-S: Client baz connecting to server at 0.0.0.0:8202\n-S: Mounting on mnt/bvt_client3/\n-S: Mounting on mnt/bvt_client2/\n!E: Ignored file type used for mnt/bvt_client/gt-data05.jpg.downloaded_file.294-4845839411657590181\n!E: Ignored file type used for mnt/bvt_client/gt-data05.jpg.downloaded_file.294-4845839411657590181\n-S: Client client1 connecting to server at 0.0.0.0:8202\n!E: INVALID MATCH for gt-data01.jpg. The client (2944844046) does not match the server (3814976353).\n!E: INVALID MATCH for gt-data02.jpg. The client (3814976353) does not match the server (2944844046).\n!E: INVALID MATCH for gt-data04.jpg. The client (2944844046) does not match the server (381829735).\n!E: INVALID MATCH for gt-data07.jpg. The client (3814976353) does not match the server (2944844046).\n!E: 4 errors in file comparison.\n",
+  "client_returncode": 0,
+  "passfail": "failed",
+  "server_console": "-S: DFSServerNode server listening on 0.0.0.0:8202\n-S: DFSServerNode server listening on 0.0.0.0:8202\n-S: Async thread 4 started\n-S: Async thread 3 started\n-S: Async thread 2 started\n-S: Async thread 1 started\n-S: Server thread  started\n-S: Queue thread  started\n!E: HandleAsyncRPC failed to get an ok from completion queue. Did the client crash?\n!E: HandleAsyncRPC failed to get an ok from completion queue. Did the client crash?\n!E: HandleAsyncRPC failed to get an ok from completion queue. Did the client crash?\n",
+  "server_returncode": 0
+}
+Traceback (most recent call last):
+  File "/autograder/source/gt-cs6200-graders/app/pr4_grpc_dfs/gios.py", line 295, in func_wrapper
+    ans = func(self)
+  File "/autograder/source/gt-cs6200-graders/app/pr4_grpc_dfs/run.py", line 616, in test_multiclient_coordination
+    self.go('compare2', 'COMPARING', test_file, server_started=True)
+  File "/autograder/source/gt-cs6200-graders/app/pr4_grpc_dfs/run.py", line 391, in go
+    self.assertTrue(is_log_correct(), "An incorrect value was returned from the grpc server.")
+AssertionError: False is not true : An incorrect value was returned from the grpc server.
