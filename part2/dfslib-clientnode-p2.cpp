@@ -306,6 +306,118 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
     //
     // Hint: You may want to match the mtime on local files to the server's mtime
     //
+
+    if (!service_stub || !IsValidFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    FileRequest file_req;
+    file_req.set_filename(filename);
+
+    FileStatusResponse file_status_resp;
+
+    // retrieve server's file metadata
+    {
+        ClientContext stat_ctx;
+        SetDeadline(&stat_ctx, deadline_timeout);
+
+        Status stat_status = service_stub->GetFileStatus(&stat_ctx, file_req, &file_status_resp);
+        if (!stat_status.ok()) {
+            // panic, file status got issue
+            return stat_status.error_code();
+        }
+    }
+
+    // check if local file is already identical
+    const std::string file_destination_path = WrapPath(filename);
+    struct stat st{};
+    if (GetLocalStat(file_destination_path, &st) && dfs_file_checksum(file_destination_path, &crc_table) == file_status_resp.crc()) {
+
+        // update the local file meta time to server if not equal
+        if (file_status_resp.mtime() != st.st_mtime) {
+            utimbuf file_meta_time{};
+            file_meta_time.actime = file_status_resp.mtime();
+            file_meta_time.modtime = file_status_resp.mtime();
+            utime(file_destination_path.c_str(), &file_meta_time);
+        }
+
+        return StatusCode::ALREADY_EXISTS;
+    }
+
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    std::unique_ptr reader_chunk_from_server(service_stub->FetchFile(&ctx, file_req));
+
+    const std::string temporary_file_path = file_destination_path + ".downloaded_file." + std::to_string(getpid()) + "-" + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
+    std::ofstream temp_output_file(temporary_file_path, std::ios::binary | std::ios::trunc);
+
+    // unable to open output file
+    if (!temp_output_file.is_open()) {
+        return StatusCode::PERMISSION_DENIED;
+    }
+
+    int64_t mtime = file_status_resp.mtime(); // use the server file status time
+    bool has_received_file_meta = false;
+    FileChunk curr_chunk;
+    while (reader_chunk_from_server->Read(&curr_chunk)) {
+        // checks server is returning chunks belonging to requested file
+        // when the server returns a different filename, we treat it as data-integrity problem
+        if (!curr_chunk.filename().empty() && curr_chunk.filename() != filename) {
+            // remember to close
+            temp_output_file.close();
+
+            // remove the temp file when there is data integrity issue
+            std::remove(temporary_file_path.c_str());
+
+            return StatusCode::DATA_LOSS;
+        }
+
+        // get file meta data
+        if (!has_received_file_meta) {
+            if (curr_chunk.mtime() != 0) {
+                mtime = curr_chunk.mtime();
+            }
+
+            has_received_file_meta = true;
+        }
+
+        if (!curr_chunk.content().empty()) {
+            temp_output_file.write(curr_chunk.content().data(), static_cast<std::streamsize>(curr_chunk.content().size()));
+        }
+
+        if (!temp_output_file.good()) {
+            break;
+        }
+    }
+
+    // remember to close
+    temp_output_file.close();
+
+    Status status = reader_chunk_from_server->Finish();
+    if (!status.ok() || !temp_output_file.good()) {
+        std::remove(temporary_file_path.c_str());
+        return ConvertResultCode(status);
+    }
+
+    // verify the file checksum before renaming
+    if (dfs_file_checksum(temporary_file_path, &crc_table) != file_status_resp.crc()) {
+        std::remove(temporary_file_path.c_str());
+        return StatusCode::DATA_LOSS;
+    }
+
+    utimbuf file_meta_time{};
+    file_meta_time.actime = static_cast<time_t>(mtime);
+    file_meta_time.modtime = static_cast<time_t>(mtime);
+
+    // check if set time succeeded and rename has succeeded
+    if (utime(temporary_file_path.c_str(), &file_meta_time) != 0 || std::rename(temporary_file_path.c_str(), file_destination_path.c_str()) != 0) {
+        std::remove(temporary_file_path.c_str());
+        return StatusCode::INTERNAL;
+    }
+
+    return StatusCode::OK;
 }
 
 grpc::StatusCode DFSClientNodeP2::Delete(const std::string &filename) {
