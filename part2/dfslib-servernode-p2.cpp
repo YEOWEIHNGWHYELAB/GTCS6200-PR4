@@ -355,7 +355,159 @@ public:
         return Status::OK;
     }
 
+    Status StoreFile(ServerContext* context, ServerReader<StoreFileRequest>* reader, FileStatusResponse* resp) override {
+        StoreFileRequest req;
+        if (!reader->Read(&req) || !ValidateFilename(req.filename()) || req.client_id().empty()) {
+            return Status(StatusCode::INVALID_ARGUMENT, "missing or invalid upload metadata");
+        }
+
+        // check if client own write lock first
+        const std::string filename = req.filename(), client_id = req.client_id();
+        if (!DoesClientOwnWriteLock(filename, client_id)) {
+            return Status(StatusCode::PERMISSION_DENIED, "client does not own write lock, reject");
+        }
+
+        const std::string temporary_file_path = mount_path + TEMP_PREFIX +
+                std::to_string(getpid()) + "-" +
+                std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
+        std::ofstream temp_output_file(temporary_file_path, std::ios::binary | std::ios::trunc);
+
+        // unable to create temp file
+        if (!temp_output_file.is_open()) {
+            ReleaseFileWriteLock(filename, client_id);
+            return Status(StatusCode::PERMISSION_DENIED, "cannot create upload file");
+        }
+
+        bool write_is_successful = true;
+        auto write_chunk = [&](const std::string& bytes) {
+            if (!bytes.empty()) {
+                temp_output_file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
             }
+
+            if (!temp_output_file.good()) {
+                write_is_successful = false;
+            }
+        };
+
+        write_chunk(req.content());
+        while (write_is_successful && reader->Read(&req)) {
+            // again to make sure that filename or client id don't change mid way through streaming by attacker
+            if ((!req.filename().empty() && req.filename() != filename) || (!req.client_id().empty() && req.client_id() != client_id)) {
+                write_is_successful = false;
+                break;
+            }
+
+            write_chunk(req.content());
+        }
+
+        // remember to close!
+        temp_output_file.close();
+
+        if (context->IsCancelled() || !write_is_successful || temp_output_file.fail()) {
+            std::remove(temporary_file_path.c_str());
+            ReleaseFileWriteLock(filename, client_id);
+            return Status(context->IsCancelled() ? StatusCode::CANCELLED : StatusCode::RESOURCE_EXHAUSTED, "upload failed");
+        }
+
+        utimbuf file_meta_time{};
+        file_meta_time.actime = static_cast<time_t>(req.mtime());
+        file_meta_time.modtime = static_cast<time_t>(req.mtime());
+
+        if (utime(temporary_file_path.c_str(), &file_meta_time) != 0) {
+            std::remove(temporary_file_path.c_str());
+            ReleaseFileWriteLock(filename, client_id);
+            return Status(StatusCode::INTERNAL, "unable to preserve mtime");
+        }
+
+        {
+            std::lock_guard fs_mtx(filesystem_mutex);
+
+            // rename the temp file into the actual filename
+            if (std::rename(temporary_file_path.c_str(), WrapPath(filename).c_str()) != 0) {
+                int rename_err = errno;
+                std::remove(temporary_file_path.c_str()); ReleaseFileWriteLock(filename, client_id);
+                return Status(StatusCode::INTERNAL, std::string("rename failed: ") + std::strerror(rename_err));
+            }
+        }
+
+        // in the case if the file is recreated, then we must remove this filename from the set, note that the set doesn't
+        // auto remove files from this set that have already been removed
+        {
+            std::lock_guard write_lock_mtx(write_lock_mutex);
+            deleted_files_set.erase(filename);
+        }
+
+        // remember to release write lock
+        ReleaseFileWriteLock(filename, client_id);
+
+        if (!FillStatus(WrapPath(filename), filename, resp, &crc_table)) {
+            return Status(StatusCode::INTERNAL, "stored file metadata unavailable");
+        }
+
+        return Status::OK;
+    }
+
+    Status FetchFile(ServerContext* context, const FileRequest* req, ServerWriter<FileChunk>* writer) override {
+        if (!ValidateFilename(req->filename())) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid filename");
+        }
+
+        std::lock_guard fs_mtx(filesystem_mutex);
+        std::string filename_mnt_path = WrapPath(req->filename());
+
+        struct stat st{};
+        if (lstat(filename_mnt_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+            return Status(StatusCode::NOT_FOUND, "file not found");
+        }
+
+        std::ifstream requested_file(filename_mnt_path, std::ios::binary);
+
+        if (!requested_file.is_open()) {
+            return Status(StatusCode::PERMISSION_DENIED, "cannot open file!");
+        }
+
+        const std::uint32_t crc_sum = dfs_file_checksum(filename_mnt_path, &crc_table);
+
+        bool is_first_message = true;
+        char buffer[DFS_BUFFERSIZE];
+        while (requested_file.good()) {
+            requested_file.read(buffer, sizeof(buffer));
+
+            std::streamsize num_bytes_read = requested_file.gcount();
+
+            // EOF
+            if (num_bytes_read == 0 && !is_first_message) {
+                break;
+            }
+
+            FileChunk file_chunk_to_send;
+            if (is_first_message) {
+                file_chunk_to_send.set_filename(req->filename());
+                file_chunk_to_send.set_mtime(st.st_mtime);
+                file_chunk_to_send.set_crc(crc_sum);
+                is_first_message = false;
+            }
+
+            if (num_bytes_read > 0) {
+                file_chunk_to_send.set_content(buffer, static_cast<size_t>(num_bytes_read));
+            }
+
+            if (!writer->Write(file_chunk_to_send)) {
+                return Status(StatusCode::CANCELLED, "client stopped receiving file!");
+            }
+
+            if (num_bytes_read == 0) {
+                break;
+            }
+
+            if (context->IsCancelled()) {
+                return Status(StatusCode::CANCELLED, "fetch cancelled");
+            }
+        }
+
+        return requested_file.bad() ? Status(StatusCode::INTERNAL, "error reading file!") : Status::OK;
+    }
 
     Status DeleteFile(ServerContext*, const FileRequest* req, FileOpResponse* resp) override {
         if (!ValidateFilename(req->filename()) || req->client_id().empty()) {
@@ -364,7 +516,7 @@ public:
 
         // check if the client can delete the file or not
         if (!DoesClientOwnWriteLock(req->filename(), req->client_id())) {
-            return Status(StatusCode::PERMISSION_DENIED, "client does not own write lock");
+            return Status(StatusCode::PERMISSION_DENIED, "client does not own write lock, reject");
         }
 
         // lock mutex then delete the file
