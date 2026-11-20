@@ -169,7 +169,7 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
         return write_access_lock_status;
     }
 
-    // for releasing the write clock by calling server ReleaseWriteLock rpc
+    // for releasing the write lock by calling server ReleaseWriteLock rpc
     auto release_write_lock = [&]() {
         WriteLockRequest write_lock_req;
         write_lock_req.set_filename(filename);
@@ -442,6 +442,40 @@ grpc::StatusCode DFSClientNodeP2::Delete(const std::string &filename) {
     //
     //
 
+    if (!service_stub || !IsValidFilename(filename)) {
+        return StatusCode::INVALID_ARGUMENT;
+    }
+
+    StatusCode lock_status = RequestWriteAccess(filename);
+    if (lock_status != StatusCode::OK) {
+        return lock_status;
+    }
+
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    FileRequest file_req;
+    file_req.set_filename(filename);
+    file_req.set_client_id(ClientId());
+
+    FileOpResponse file_op_resp;
+
+    Status status = service_stub->DeleteFile(&ctx, file_req, &file_op_resp);
+    if (!status.ok()) {
+        WriteLockRequest write_lock_req;
+        write_lock_req.set_filename(filename);
+        write_lock_req.set_client_id(ClientId());
+
+        FileOpResponse ignored_file_op_resp;
+
+        ClientContext release_ctx;
+        SetDeadline(&release_ctx, deadline_timeout);
+
+        // release write lock explicitly on status that are not ok
+        service_stub->ReleaseWriteLock(&release_ctx, write_lock_req, &ignored_file_op_resp);
+    }
+
+    return ConvertResultCode(status);
 }
 
 grpc::StatusCode DFSClientNodeP2::List(std::map<std::string,int>* file_map, bool display) {
