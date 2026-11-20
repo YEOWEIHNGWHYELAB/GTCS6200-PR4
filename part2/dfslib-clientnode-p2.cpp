@@ -462,6 +462,38 @@ grpc::StatusCode DFSClientNodeP2::List(std::map<std::string,int>* file_map, bool
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    if (!service_stub) {
+        return StatusCode::CANCELLED;
+    }
+
+    ClientContext ctx;
+    SetDeadline(&ctx, deadline_timeout);
+
+    ListFilesRequest list_files_req;
+
+    ListFilesResponse list_files_resp;
+
+    Status status = service_stub->ListFiles(&ctx, list_files_req, &list_files_resp);
+    if (!status.ok()) {
+        return status.error_code();
+    }
+
+    if (file_map) {
+        file_map->clear();
+    }
+
+    for (const auto& curr_file : list_files_resp.files()) {
+        if (file_map) {
+            (*file_map)[curr_file.filename()] = static_cast<int>(curr_file.mtime());
+        }
+
+        if (display) {
+            std::cout << curr_file.filename() << "\t" << curr_file.mtime() << "\t" << curr_file.size() << std::endl;
+        }
+    }
+
+    return StatusCode::OK;
 }
 
 grpc::StatusCode DFSClientNodeP2::Stat(const std::string &filename, void* file_status) {
