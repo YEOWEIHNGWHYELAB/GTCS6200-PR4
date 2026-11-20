@@ -101,6 +101,8 @@ namespace {
 //      - Hint: as the crc checksum is a simple integer, you can pass it around inside your message types.
 //
 
+
+// inheritance is used here to tell gRPC that the CallbackList RPC should use the asynchronous server
 class DFSServiceImpl final : public DFSService::WithAsyncMethod_CallbackList<DFSService::Service>,
                              public DFSCallDataManager<FileRequest, FileList> {
 
@@ -298,6 +300,7 @@ public:
                 std::lock_guard lock(queue_mutex);
 
 
+                // register pending requests with gRPC, this is a non-blocking async call
                 for (auto& queue_req : queued_tags) {
                     this->RequestCallbackList(queue_req.context, queue_req.request,
                         queue_req.response, queue_req.cq, queue_req.cq, queue_req.tag);
@@ -305,15 +308,51 @@ public:
                 }
 
                 // any finished tags first
-                queued_tags.erase(std::remove_if(
+                queued_tags.erase(std::remove_if( // std::remove_if() moves all unfinished requests towards beginning of vector, then return iterator pointing to new logical end
                     queued_tags.begin(),
                     queued_tags.end(),
-                    [](const QueueRequest<FileRequest,FileList>& queue_request){ return queue_request.finished; }
+                    [](const QueueRequest<FileRequest,FileList>& queue_req_it){ return queue_req_it.finished; }
                 ), queued_tags.end());
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+    }
+
+    Status RequestWriteLock(ServerContext*, const WriteLockRequest* req, FileOpResponse* resp) override {
+        if (!ValidateFilename(req->filename()) || req->client_id().empty()) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid filename or client id");
+        }
+
+        std::lock_guard lock(write_lock_mutex);
+
+        auto curr_it = write_locks_map.find(req->filename());
+
+        // key already exist
+        if (curr_it != write_locks_map.end() && curr_it->second != req->client_id()) {
+            return Status(StatusCode::RESOURCE_EXHAUSTED, "file is locked by another client already");
+        }
+
+        // obtain the write lock for the client by putting into the map
+        write_locks_map[req->filename()] = req->client_id();
+
+        // for common response for file operation
+        resp->set_filename(req->filename());
+
+        return Status::OK;
+    }
+
+    Status ReleaseWriteLock(ServerContext*, const WriteLockRequest* req, FileOpResponse* resp) override {
+        if (!ValidateFilename(req->filename()) || req->client_id().empty()) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid lock release request");
+        }
+
+        // just delete the filename entry in the map
+        ReleaseFileWriteLock(req->filename(), req->client_id());
+
+        resp->set_filename(req->filename());
+
+        return Status::OK;
     }
 
             }
