@@ -357,6 +357,19 @@ public:
 
             }
         }
+
+    Status GetFileStatus(ServerContext*, const FileRequest* req, FileStatusResponse* resp) override {
+        if (!ValidateFilename(req->filename())) {
+            return Status(StatusCode::INVALID_ARGUMENT, "invalid filename");
+        }
+
+        // remember that we must lock
+        std::lock_guard fs_mtx(filesystem_mutex);
+
+        // just check if the file is there and return status
+        return FillStatus(WrapPath(req->filename()), req->filename(), resp, &crc_table) ?
+            Status::OK :
+            Status(StatusCode::NOT_FOUND, "file not found");
     }
 
     //
