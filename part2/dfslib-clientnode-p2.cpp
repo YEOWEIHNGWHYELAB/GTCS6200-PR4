@@ -358,7 +358,11 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
         return StatusCode::PERMISSION_DENIED;
     }
 
-    int64_t mtime = file_status_resp.mtime(); // use the server file status time
+    // this crc checksum must not come from the GetFileStatus as some other client might have modified
+    // it before we call Fetch, it should come from the first chunk when we FetchFile, and this will lock the
+    // fs_mtx from server side
+    uint32_t expected_crc_checksum = 0;
+    int64_t mtime_from_first_chunk = 0;
     bool has_received_file_meta = false;
     FileChunk curr_chunk;
     while (reader_chunk_from_server->Read(&curr_chunk)) {
@@ -374,15 +378,23 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
             return StatusCode::DATA_LOSS;
         }
 
-        // get file meta data
+        // get file meta data from the first chunk
         if (!has_received_file_meta) {
-            if (curr_chunk.mtime() != 0) {
-                mtime = curr_chunk.mtime();
+            if (curr_chunk.filename() != filename) {
+                temp_output_file.close();
+                std::remove(temporary_file_path.c_str());
+
+                return StatusCode::DATA_LOSS;
             }
+
+            mtime_from_first_chunk = curr_chunk.mtime();
+
+            expected_crc_checksum = curr_chunk.crc();
 
             has_received_file_meta = true;
         }
 
+        // write file contents
         if (!curr_chunk.content().empty()) {
             temp_output_file.write(curr_chunk.content().data(), static_cast<std::streamsize>(curr_chunk.content().size()));
         }
@@ -401,15 +413,22 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
         return ConvertResultCode(status);
     }
 
-    // verify the file checksum before renaming
-    if (dfs_file_checksum(temporary_file_path, &crc_table) != file_status_resp.crc()) {
+    // Ensure the server sent metadata
+    if (!has_received_file_meta) {
         std::remove(temporary_file_path.c_str());
         return StatusCode::DATA_LOSS;
     }
 
+    // verify against the crc from the actual FetchFile stream
+    if (dfs_file_checksum(temporary_file_path, &crc_table) != expected_crc_checksum) {
+        std::remove(temporary_file_path.c_str());
+        return StatusCode::DATA_LOSS;
+    }
+
+    // make sure the mtime info comes from the FetchFile not the GetFileStatus as someone may modify it inbetween
     utimbuf file_meta_time{};
-    file_meta_time.actime = static_cast<time_t>(mtime);
-    file_meta_time.modtime = static_cast<time_t>(mtime);
+    file_meta_time.actime = static_cast<time_t>(mtime_from_first_chunk);
+    file_meta_time.modtime = static_cast<time_t>(mtime_from_first_chunk);
 
     // check if set time succeeded and rename has succeeded
     if (utime(temporary_file_path.c_str(), &file_meta_time) != 0 || std::rename(temporary_file_path.c_str(), file_destination_path.c_str()) != 0) {
